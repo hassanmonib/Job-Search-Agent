@@ -1,5 +1,6 @@
 """Structured job schema after LLM extraction."""
 
+from datetime import datetime
 from typing import List, Optional
 
 from pydantic import BaseModel, Field
@@ -17,6 +18,8 @@ class StructuredJob(BaseModel):
     salary: Optional[str] = Field(default=None, description="Salary or compensation info if mentioned")
     contact_email: Optional[str] = Field(default=None, description="Contact email if present")
     description_summary: Optional[str] = Field(default=None, description="Brief summary of the job description")
-    source: str = Field(..., description="Source name (e.g. LinkedIn, Indeed)")
+    source: str = Field(..., description="Standardized source key: linkedin_post, linkedin_job, indeed, etc.")
     source_url: str = Field(..., description="Original URL of the job post")
     is_valid_job: bool = Field(..., description="True if this is an active hiring post, false for reposts/fake/irrelevant")
+    posted_date: Optional[datetime] = Field(default=None, description="Extracted or inferred posting date")
+    posted_days_ago: Optional[int] = Field(default=None, description="Days ago the job was posted (from today)")

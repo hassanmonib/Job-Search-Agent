@@ -1,10 +1,11 @@
 """
 AI Job Signal Detection System – Streamlit frontend.
-No business logic in layout; orchestration delegated to agents and services.
+No business logic in layout; orchestration and filtering in services.
 """
 
 import asyncio
 import io
+import csv
 from collections import Counter
 from typing import List
 
@@ -14,6 +15,26 @@ from agents.search_agent import run_search_agent
 from agents.extractor_agent import run_extractor_agent
 from config import SERPAPI_KEY, OPENAI_API_KEY, MAX_RESULTS_MIN, MAX_RESULTS_MAX
 from schemas.structured_job import StructuredJob
+from services.filter_service import filter_by_date, filter_by_source
+
+# Posting date filter options (job board standard)
+DATE_FILTER_MAP = {
+    "All Time": None,
+    "Last 24 Hours": 1,
+    "Last 3 Days": 3,
+    "Last 7 Days": 7,
+    "Last 14 Days": 14,
+    "Last 30 Days": 30,
+    "Last 90 Days": 90,
+}
+DATE_FILTER_OPTIONS = list(DATE_FILTER_MAP.keys())
+
+# Display names for source keys (filter multiselect)
+SOURCE_DISPLAY = {
+    "linkedin_post": "LinkedIn Posts",
+    "linkedin_job": "LinkedIn Jobs",
+    "indeed": "Indeed",
+}
 
 
 def _run_pipeline(job_title: str, location: str, max_results: int) -> List[StructuredJob]:
@@ -32,23 +53,23 @@ def _run_pipeline(job_title: str, location: str, max_results: int) -> List[Struc
         loop.close()
 
 
-def _skill_frequency_summary(jobs: List[StructuredJob], top_n: int = 5) -> List[tuple[str, int]]:
+def _skill_frequency_summary(jobs: List[StructuredJob], top_n: int = 5) -> List[tuple]:
     """Top N skills by frequency across valid jobs."""
-    skills: List[str] = []
+    skills = []
     for j in jobs:
         if j.is_valid_job and j.skills:
-            skills.extend(s.strip() for s in j.skills if s and s.strip())
+            skills.extend(s.strip() for s in j.skills if s and str(s).strip())
     return Counter(skills).most_common(top_n)
 
 
 def _export_csv(jobs: List[StructuredJob]) -> bytes:
     """Export jobs to CSV bytes."""
-    import csv
     out = io.StringIO()
     writer = csv.writer(out)
     headers = [
         "title", "company", "location", "employment_type", "experience_required",
-        "skills", "salary", "contact_email", "description_summary", "source", "source_url", "is_valid_job"
+        "skills", "salary", "contact_email", "description_summary", "source", "source_url",
+        "is_valid_job", "posted_date", "posted_days_ago",
     ]
     writer.writerow(headers)
     for j in jobs:
@@ -65,21 +86,27 @@ def _export_csv(jobs: List[StructuredJob]) -> bytes:
             j.source or "",
             j.source_url or "",
             j.is_valid_job,
+            str(j.posted_date) if j.posted_date else "",
+            j.posted_days_ago if j.posted_days_ago is not None else "",
         ]
         writer.writerow(row)
     return out.getvalue().encode("utf-8")
 
 
+def _source_display_label(key: str) -> str:
+    """Label for source in multiselect."""
+    return SOURCE_DISPLAY.get(key, key.replace("_", " ").title())
+
+
 def render_layout() -> None:
-    """Streamlit page layout only; state and handlers are applied here."""
+    """Streamlit page layout; filters and display use services layer."""
     st.set_page_config(page_title="AI Job Signal Detection System", layout="wide")
     st.title("AI Job Signal Detection System")
     st.markdown("*Search LinkedIn and Indeed job signals using AI-powered extraction.*")
     st.divider()
 
     # ----- Input section -----
-    input_section = st.container()
-    with input_section:
+    with st.container():
         col1, col2, col3 = st.columns([2, 2, 1])
         with col1:
             job_title = st.text_input("Job Title", placeholder="e.g. AI Engineer", key="job_title")
@@ -95,25 +122,25 @@ def render_layout() -> None:
             )
         search_clicked = st.button("Search", type="primary", key="search_btn")
 
-    # Session state init
-    if "jobs" not in st.session_state:
-        st.session_state["jobs"] = []
+    # Session state: original_jobs (immutable after search), error
+    if "original_jobs" not in st.session_state:
+        st.session_state["original_jobs"] = []
     if "error" not in st.session_state:
         st.session_state["error"] = None
     if "show_invalid" not in st.session_state:
         st.session_state["show_invalid"] = False
 
-    # ----- Handle search (business logic in pipeline, not in layout) -----
+    # ----- Run search (only on button click) -----
     if search_clicked:
         if not job_title or not job_title.strip():
             st.session_state["error"] = "Please enter a job title."
-            st.session_state["jobs"] = []
+            st.session_state["original_jobs"] = []
         elif not SERPAPI_KEY:
             st.session_state["error"] = "SERPAPI_KEY is not set. Add it to your .env file."
-            st.session_state["jobs"] = []
+            st.session_state["original_jobs"] = []
         elif not OPENAI_API_KEY:
             st.session_state["error"] = "OPENAI_API_KEY is not set. Add it to your .env file."
-            st.session_state["jobs"] = []
+            st.session_state["original_jobs"] = []
         else:
             st.session_state["error"] = None
             with st.spinner("Searching job signals and extracting structured data…"):
@@ -123,84 +150,120 @@ def render_layout() -> None:
                         location=(location or "").strip(),
                         max_results=max_results,
                     )
-                    st.session_state["jobs"] = jobs
+                    st.session_state["original_jobs"] = jobs
                 except Exception as e:
                     st.session_state["error"] = f"Search failed: {str(e)}"
-                    st.session_state["jobs"] = []
+                    st.session_state["original_jobs"] = []
 
-    # ----- Error message -----
     if st.session_state.get("error"):
         st.error(st.session_state["error"])
 
-    # ----- Results section -----
-    jobs: List[StructuredJob] = st.session_state.get("jobs") or []
-    valid_jobs = [j for j in jobs if j.is_valid_job]
-    invalid_jobs = [j for j in jobs if not j.is_valid_job]
+    original_jobs: List[StructuredJob] = st.session_state.get("original_jobs") or []
+
+    # ----- Filter section: always visible so users see the updated UI -----
+    st.subheader("Filters")
+    with st.container():
+        fcol1, fcol2 = st.columns(2)
+        with fcol1:
+            date_filter_label = st.selectbox(
+                "Posting Date Filter",
+                options=DATE_FILTER_OPTIONS,
+                index=0,
+                key="date_filter",
+            )
+            days_limit = DATE_FILTER_MAP[date_filter_label]
+        with fcol2:
+            available_sources = sorted(set(j.source for j in original_jobs))
+            if available_sources:
+                selected_sources = st.multiselect(
+                    "Filter by Source",
+                    options=available_sources,
+                    default=available_sources,
+                    format_func=_source_display_label,
+                    key="source_filter",
+                )
+            else:
+                st.multiselect(
+                    "Filter by Source",
+                    options=[],
+                    default=[],
+                    key="source_filter",
+                    help="Run a search to see sources (LinkedIn, Indeed, etc.).",
+                )
+                selected_sources = []
+
+    # Apply pipeline only when we have jobs (no mutation of original_jobs)
+    if original_jobs:
+        filtered_jobs = filter_by_source(original_jobs, selected_sources)
+        filtered_jobs = filter_by_date(filtered_jobs, days_limit)
+    else:
+        filtered_jobs = []
 
     st.divider()
-    st.subheader("Results")
 
-    if not jobs:
+    # ----- Results section (based on filtered_jobs) -----
+    st.subheader("Results")
+    valid_jobs = [j for j in filtered_jobs if j.is_valid_job]
+    invalid_jobs = [j for j in filtered_jobs if not j.is_valid_job]
+
+    if not original_jobs:
         if not search_clicked and not st.session_state.get("error"):
             st.info("Enter a job title and location, then click **Search** to find job signals.")
         elif search_clicked and not st.session_state.get("error"):
             st.warning("No job signals found. Try different keywords or location.")
-        return
+    else:
+        st.markdown(f"**Total (filtered):** {len(filtered_jobs)} · **Valid jobs:** {len(valid_jobs)}")
+        show_invalid = st.checkbox(
+            "Show invalid / non-job results",
+            value=st.session_state["show_invalid"],
+            key="show_invalid_cb",
+        )
+        st.session_state["show_invalid"] = show_invalid
 
-    # Summary row
-    st.markdown(f"**Total signals processed:** {len(jobs)} · **Valid jobs:** {len(valid_jobs)}")
-    show_invalid = st.checkbox(
-        "Show invalid / non-job results",
-        value=st.session_state["show_invalid"],
-        key="show_invalid_cb",
-    )
-    st.session_state["show_invalid"] = show_invalid
+        skill_summary = _skill_frequency_summary(valid_jobs, 5)
+        if skill_summary:
+            with st.expander("Top 5 skills (frequency)"):
+                for skill, count in skill_summary:
+                    st.markdown(f"- **{skill}** ({count})")
 
-    # Top 5 skills
-    skill_summary = _skill_frequency_summary(valid_jobs, 5)
-    if skill_summary:
-        with st.expander("Top 5 skills (frequency)"):
-            for skill, count in skill_summary:
-                st.markdown(f"- **{skill}** ({count})")
+        buf = _export_csv(valid_jobs if not show_invalid else filtered_jobs)
+        st.download_button(
+            "Export to CSV",
+            data=buf,
+            file_name="job_signals.csv",
+            mime="text/csv",
+            key="export_csv",
+        )
 
-    # Export CSV
-    buf = _export_csv(valid_jobs if not show_invalid else jobs)
-    st.download_button(
-        "Export to CSV",
-        data=buf,
-        file_name="job_signals.csv",
-        mime="text/csv",
-        key="export_csv",
-    )
+        to_show = valid_jobs + (invalid_jobs if show_invalid else [])
 
-    # Job cards: show valid always; add invalid if toggle on
-    to_show = valid_jobs + (invalid_jobs if show_invalid else [])
-
-    for job in to_show:
-        with st.container():
-            st.markdown("---")
-            col_a, col_b = st.columns([3, 1])
-            with col_a:
-                st.markdown(f"### {job.title or 'Untitled'}")
-                st.caption(f"**Company:** {job.company or '—'} · **Location:** {job.location or '—'}")
-                if job.employment_type or job.experience_required:
-                    st.caption(f"*{job.employment_type or ''} {job.experience_required or ''}*".strip())
-                if job.skills:
-                    badges = " ".join(f"`{s}`" for s in job.skills[:12] if s and str(s).strip())
-                    if badges:
-                        st.markdown(badges)
-                st.caption(f"**Source:** {job.source}")
-            with col_b:
-                st.link_button("Open Job", url=job.source_url, type="secondary")
-                if not job.is_valid_job:
-                    st.caption("⚠️ Invalid/non-job")
-            if job.description_summary:
-                with st.expander("Description"):
-                    st.markdown(job.description_summary)
-            if job.salary:
-                st.caption(f"Salary: {job.salary}")
-            if job.contact_email:
-                st.caption(f"Contact: {job.contact_email}")
+        for job in to_show:
+            with st.container():
+                st.markdown("---")
+                col_a, col_b = st.columns([3, 1])
+                with col_a:
+                    st.markdown(f"### {job.title or 'Untitled'}")
+                    st.caption(f"**Company:** {job.company or '—'} · **Location:** {job.location or '—'}")
+                    if job.employment_type or job.experience_required:
+                        st.caption(f"*{job.employment_type or ''} {job.experience_required or ''}*".strip())
+                    if job.skills:
+                        badges = " ".join(f"`{s}`" for s in job.skills[:12] if s and str(s).strip())
+                        if badges:
+                            st.markdown(badges)
+                    st.caption(f"**Source:** {_source_display_label(job.source)}")
+                    if job.posted_days_ago is not None:
+                        st.caption(f"Posted {job.posted_days_ago} days ago")
+                with col_b:
+                    st.link_button("Open Job", url=job.source_url, type="secondary")
+                    if not job.is_valid_job:
+                        st.caption("⚠️ Invalid/non-job")
+                if job.description_summary:
+                    with st.expander("Description"):
+                        st.markdown(job.description_summary)
+                if job.salary:
+                    st.caption(f"Salary: {job.salary}")
+                if job.contact_email:
+                    st.caption(f"Contact: {job.contact_email}")
 
 
 if __name__ == "__main__":

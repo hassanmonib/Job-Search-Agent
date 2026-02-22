@@ -13,10 +13,24 @@ from schemas.raw_job import RawJobSignal
 from schemas.structured_job import StructuredJob
 from services.page_fetcher import fetch_pages_concurrent
 from services.text_cleaner import extract_main_content
+from utils.date_parser import normalize_posted_date
 from utils.helpers import deduplicate_structured_jobs, extract_emails
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Standardized source keys for filtering (future-proof: glassdoor, etc.)
+SOURCE_NORMALIZE = {
+    "linkedin posts": "linkedin_post",
+    "linkedin jobs": "linkedin_job",
+    "indeed": "indeed",
+}
+
+
+def _normalize_source(source: str) -> str:
+    """Map display names to standardized source keys."""
+    key = (source or "").strip().lower()
+    return SOURCE_NORMALIZE.get(key, key.replace(" ", "_") if key else "unknown")
 
 EXTRACTION_SYSTEM_PROMPT = """You are an AI job information extraction system.
 Extract structured job data from the content below.
@@ -32,10 +46,11 @@ Return only valid JSON matching this schema (no markdown, no code block):
   "salary": "string or null",
   "contact_email": "string or null",
   "description_summary": "string or null",
-  "source": "string (use the source name provided)",
+  "source": "string (will be normalized)",
   "source_url": "string (use the URL provided)",
   "is_valid_job": true or false
 }
+Extract any visible posting date or relative time (e.g. \"2 days ago\", \"Posted 1 week ago\") if present in the content.
 Support unstructured recruiter posts, incomplete descriptions, and extract any mentioned skills and experience.
 If you find an email in the content, put it in contact_email; otherwise null."""
 
@@ -95,10 +110,16 @@ async def _extract_one(
         parsed = _parse_llm_json(choice.message.content)
         if not parsed:
             return None
-        # Ensure required fields from our schema
-        parsed.setdefault("source", source)
+        # Ensure required fields; normalize source to standard keys
         parsed.setdefault("source_url", source_url)
         parsed.setdefault("is_valid_job", True)
+        parsed["source"] = _normalize_source(parsed.get("source") or source)
+        # Extract posting date from page content (do not use LLM date fields)
+        posted_date, posted_days_ago = normalize_posted_date(content_for_llm)
+        parsed.pop("posted_date", None)
+        parsed.pop("posted_days_ago", None)
+        parsed["posted_date"] = posted_date
+        parsed["posted_days_ago"] = posted_days_ago
         job = StructuredJob(**parsed)
         job = _merge_email_into_job(job, content_for_llm)
         return job
