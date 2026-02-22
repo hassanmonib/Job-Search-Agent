@@ -19,11 +19,12 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Standardized source keys for filtering (future-proof: glassdoor, etc.)
+# Standardized source keys (LLM may return display names; map to keys)
 SOURCE_NORMALIZE = {
     "linkedin posts": "linkedin_post",
     "linkedin jobs": "linkedin_job",
     "indeed": "indeed",
+    "glassdoor": "glassdoor",
 }
 
 

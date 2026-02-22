@@ -28,14 +28,16 @@ def _is_job_like(url: str, title: str, snippet: str) -> bool:
             return True  # recruiter posts sometimes under company
     if "indeed.com" in url_lower and ("/job/" in url_lower or "/jobs" in url_lower or "/viewjob" in url_lower):
         return True
+    if "glassdoor.com" in url_lower and ("/job/" in url_lower or "/job-" in url_lower or "/Job" in url_lower):
+        return True
     # If we have job-like keywords in title/snippet, allow
     job_keywords = ("job", "hiring", "position", "recruit", "engineer", "developer", "role", "vacancy")
     text = f"{title_lower} {snippet_lower}"
     return any(kw in text for kw in job_keywords)
 
 
-def _parse_organic_result(item: dict[str, Any], source_label: str) -> Optional[RawJobSignal]:
-    """Build RawJobSignal from SerpAPI organic result."""
+def _parse_organic_result(item: dict[str, Any], source_key: str) -> Optional[RawJobSignal]:
+    """Build RawJobSignal from SerpAPI organic result. source_key is standardized (e.g. linkedin_post)."""
     link = item.get("link") or item.get("url")
     if not link:
         return None
@@ -44,7 +46,7 @@ def _parse_organic_result(item: dict[str, Any], source_label: str) -> Optional[R
     if not _is_job_like(link, title, snippet):
         return None
     return RawJobSignal(
-        source=source_label,
+        source=source_key,
         url=link,
         title_snippet=title[:500] if title else "",
         description_snippet=snippet[:1000] if snippet else "",
@@ -55,6 +57,7 @@ async def search_serp(
     query: str,
     api_key: str,
     num: int = 10,
+    source_key: str = "unknown",
 ) -> list[RawJobSignal]:
     """
     Run a single SerpAPI Google search and return raw job signals from organic results.
@@ -83,26 +86,33 @@ async def search_serp(
         return []
 
     organic = data.get("organic_results") or []
-    source_label = "Google"  # We'll override per-query in search_agent
     signals = []
     for item in organic:
-        sig = _parse_organic_result(item, source_label)
+        sig = _parse_organic_result(item, source_key)
         if sig:
             signals.append(sig)
     logger.info("SerpAPI query '%s' returned %s raw signals", query[:50], len(signals))
     return signals
 
 
-def build_search_queries(job_title: str, location: str) -> list[tuple[str, str]]:
+def build_search_queries(
+    job_title: str,
+    location: str,
+    selected_sources: list[str],
+) -> list[tuple[str, str]]:
     """
-    Build (query, source_label) list for LinkedIn posts, LinkedIn jobs, and Indeed.
+    Build (query, source_key) list only for selected sources.
+    Uses config.AVAILABLE_SOURCES for query patterns. Extensible for future sources.
     """
-    qt = job_title.strip() or "job"
-    loc = location.strip() or ""
-    q_loc = f' "{loc}"' if loc else ""
+    from config import AVAILABLE_SOURCES
 
-    return [
-        (f'site:linkedin.com/posts "{qt}"{q_loc}', "LinkedIn Posts"),
-        (f'site:linkedin.com/jobs "{qt}"{q_loc}', "LinkedIn Jobs"),
-        (f'site:indeed.com "{qt}"{q_loc}', "Indeed"),
-    ]
+    qt = (job_title or "").strip() or "job"
+    loc = (location or "").strip()
+    result = []
+    for key in selected_sources:
+        if key not in AVAILABLE_SOURCES:
+            continue
+        pattern = AVAILABLE_SOURCES[key]["query_pattern"]
+        query = pattern.format(job_title=qt, location=loc)
+        result.append((query, key))
+    return result

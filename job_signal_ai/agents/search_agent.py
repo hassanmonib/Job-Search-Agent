@@ -1,7 +1,7 @@
 """Search Agent: builds queries, calls SerpAPI, returns deduplicated raw job signals."""
 
 import asyncio
-from typing import List
+from typing import List, Optional
 
 from schemas.raw_job import RawJobSignal
 from services.serp_service import build_search_queries, search_serp
@@ -16,34 +16,36 @@ async def run_search_agent(
     job_title: str,
     location: str,
     max_results: int = 25,
+    selected_sources: Optional[List[str]] = None,
 ) -> List[RawJobSignal]:
     """
-    Run the Search Agent: build queries, call SerpAPI for each pattern,
+    Run the Search Agent: build queries only for selected sources, call SerpAPI,
     collect and deduplicate raw job signals. Returns at most max_results (cap 25).
+    RawJobSignal.source is set to standardized key (linkedin_post, linkedin_job, indeed).
     """
     if not SERPAPI_KEY:
         logger.error("SERPAPI_KEY is not set; cannot run search")
         return []
 
-    queries = build_search_queries(job_title, location)
-    # Distribute max_results across queries (e.g. 3 queries -> ~8-9 each)
+    from config import AVAILABLE_SOURCES
+
+    if not selected_sources:
+        selected_sources = list(AVAILABLE_SOURCES.keys())
+    # Only query selected sources that exist in config
+    selected_sources = [s for s in selected_sources if s in AVAILABLE_SOURCES]
+    if not selected_sources:
+        logger.warning("No valid selected_sources; nothing to search")
+        return []
+
+    queries = build_search_queries(job_title, location, selected_sources)
     per_query = max(5, (max_results + len(queries) - 1) // len(queries))
-    per_query = min(per_query, 30)  # SerpAPI typical max per request
+    per_query = min(per_query, 30)
 
     all_signals: List[RawJobSignal] = []
-    for query, source_label in queries:
+    for query, source_key in queries:
         try:
-            # SerpAPI returns generic "Google" – we override source from our label
-            raw = await search_serp(query, SERPAPI_KEY, num=per_query)
-            for s in raw:
-                all_signals.append(
-                    RawJobSignal(
-                        source=source_label,
-                        url=s.url,
-                        title_snippet=s.title_snippet,
-                        description_snippet=s.description_snippet,
-                    )
-                )
+            raw = await search_serp(query, SERPAPI_KEY, num=per_query, source_key=source_key)
+            all_signals.extend(raw)
         except Exception as e:
             logger.exception("Search failed for query '%s': %s", query[:50], e)
 

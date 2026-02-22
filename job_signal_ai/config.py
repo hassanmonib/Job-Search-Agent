@@ -28,3 +28,24 @@ MAX_RESULTS_MAX: int = 30
 
 # Concurrency
 EXTRACTOR_CONCURRENCY: int = 5  # Max concurrent page fetches + LLM calls per batch
+
+# Centralized job sources (extensible: add new entry for each source)
+# All query logic is generated from this dict; do not hardcode elsewhere.
+AVAILABLE_SOURCES: dict = {
+    "linkedin_post": {
+        "label": "LinkedIn Posts",
+        "query_pattern": 'site:linkedin.com/posts "{job_title}" "{location}"',
+    },
+    "linkedin_job": {
+        "label": "LinkedIn Jobs",
+        "query_pattern": 'site:linkedin.com/jobs "{job_title}" "{location}"',
+    },
+    "indeed": {
+        "label": "Indeed",
+        "query_pattern": 'site:indeed.com "{job_title}" "{location}"',
+    },
+    "glassdoor": {
+        "label": "Glassdoor",
+        "query_pattern": 'site:glassdoor.com/Job "{job_title}" "{location}"',
+    },
+}

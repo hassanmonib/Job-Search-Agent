@@ -13,7 +13,13 @@ import streamlit as st
 
 from agents.search_agent import run_search_agent
 from agents.extractor_agent import run_extractor_agent
-from config import SERPAPI_KEY, OPENAI_API_KEY, MAX_RESULTS_MIN, MAX_RESULTS_MAX
+from config import (
+    SERPAPI_KEY,
+    OPENAI_API_KEY,
+    MAX_RESULTS_MIN,
+    MAX_RESULTS_MAX,
+    AVAILABLE_SOURCES,
+)
 from schemas.structured_job import StructuredJob
 from services.filter_service import filter_by_date, filter_by_source
 
@@ -29,21 +35,40 @@ DATE_FILTER_MAP = {
 }
 DATE_FILTER_OPTIONS = list(DATE_FILTER_MAP.keys())
 
-# Display names for source keys (filter multiselect)
-SOURCE_DISPLAY = {
-    "linkedin_post": "LinkedIn Posts",
-    "linkedin_job": "LinkedIn Jobs",
-    "indeed": "Indeed",
-}
+# Source labels from centralized config (for post-filter and cards)
+SOURCE_DISPLAY = {k: v["label"] for k, v in AVAILABLE_SOURCES.items()}
+# Pre-search options: "All" (UI convenience) + every source key; "All" never passed to Search Agent
+ALL_SOURCES_KEY = "All"
+PRE_SEARCH_SOURCE_OPTIONS = [ALL_SOURCES_KEY] + list(AVAILABLE_SOURCES.keys())
+PRE_SEARCH_SOURCE_DEFAULT = [ALL_SOURCES_KEY]
 
 
-def _run_pipeline(job_title: str, location: str, max_results: int) -> List[StructuredJob]:
-    """Run Search Agent then Extractor Agent; return structured jobs. Sync wrapper for Streamlit."""
+def _effective_sources_for_search(selected: List[str]) -> List[str]:
+    """Compute sources to pass to Search Agent. 'All' means every AVAILABLE_SOURCES key."""
+    if not selected:
+        return []
+    if ALL_SOURCES_KEY in selected:
+        return list(AVAILABLE_SOURCES.keys())
+    return [s for s in selected if s in AVAILABLE_SOURCES]
+
+
+def _run_pipeline(
+    job_title: str,
+    location: str,
+    max_results: int,
+    selected_sources: List[str],
+) -> List[StructuredJob]:
+    """Run Search Agent (only selected sources) then Extractor Agent; return structured jobs."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         raw_signals = loop.run_until_complete(
-            run_search_agent(job_title=job_title, location=location, max_results=max_results)
+            run_search_agent(
+                job_title=job_title,
+                location=location,
+                max_results=max_results,
+                selected_sources=selected_sources,
+            )
         )
         if not raw_signals:
             return []
@@ -94,7 +119,9 @@ def _export_csv(jobs: List[StructuredJob]) -> bytes:
 
 
 def _source_display_label(key: str) -> str:
-    """Label for source in multiselect."""
+    """Label for source in multiselect (from centralized config). 'All' is UI-only."""
+    if key == ALL_SOURCES_KEY:
+        return "All"
     return SOURCE_DISPLAY.get(key, key.replace("_", " ").title())
 
 
@@ -104,6 +131,18 @@ def render_layout() -> None:
     st.title("AI Job Signal Detection System")
     st.markdown("*Search LinkedIn and Indeed job signals using AI-powered extraction.*")
     st.divider()
+
+    # ----- Pre-search: source selection (controls which sources are queried) -----
+    st.subheader("Select Job Sources")
+    selected_sources_pre = st.multiselect(
+        "Select Job Sources",
+        options=PRE_SEARCH_SOURCE_OPTIONS,
+        default=PRE_SEARCH_SOURCE_DEFAULT,
+        format_func=_source_display_label,
+        key="pre_search_sources",
+        help="Choose All to search every source, or pick specific sources. Change before clicking Search.",
+    )
+    effective_sources = _effective_sources_for_search(selected_sources_pre)
 
     # ----- Input section -----
     with st.container():
@@ -135,6 +174,9 @@ def render_layout() -> None:
         if not job_title or not job_title.strip():
             st.session_state["error"] = "Please enter a job title."
             st.session_state["original_jobs"] = []
+        elif not effective_sources:
+            st.session_state["error"] = "Select at least one job source (e.g. All, or specific sources) before searching."
+            st.session_state["original_jobs"] = []
         elif not SERPAPI_KEY:
             st.session_state["error"] = "SERPAPI_KEY is not set. Add it to your .env file."
             st.session_state["original_jobs"] = []
@@ -149,6 +191,7 @@ def render_layout() -> None:
                         job_title=job_title.strip(),
                         location=(location or "").strip(),
                         max_results=max_results,
+                        selected_sources=effective_sources,
                     )
                     st.session_state["original_jobs"] = jobs
                 except Exception as e:
