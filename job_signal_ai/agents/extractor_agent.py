@@ -115,6 +115,8 @@ async def _extract_one(
         parsed.setdefault("source_url", source_url)
         parsed.setdefault("is_valid_job", True)
         parsed["source"] = _normalize_source(parsed.get("source") or source)
+        # Searched location from raw signal (multi-location search)
+        parsed["searched_location"] = getattr(raw, "searched_location", "") or None
         # Extract posting date from page content (do not use LLM date fields)
         posted_date, posted_days_ago = normalize_posted_date(content_for_llm)
         parsed.pop("posted_date", None)

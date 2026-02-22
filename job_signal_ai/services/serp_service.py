@@ -36,8 +36,12 @@ def _is_job_like(url: str, title: str, snippet: str) -> bool:
     return any(kw in text for kw in job_keywords)
 
 
-def _parse_organic_result(item: dict[str, Any], source_key: str) -> Optional[RawJobSignal]:
-    """Build RawJobSignal from SerpAPI organic result. source_key is standardized (e.g. linkedin_post)."""
+def _parse_organic_result(
+    item: dict[str, Any],
+    source_key: str,
+    searched_location: str = "",
+) -> Optional[RawJobSignal]:
+    """Build RawJobSignal from SerpAPI organic result."""
     link = item.get("link") or item.get("url")
     if not link:
         return None
@@ -50,6 +54,7 @@ def _parse_organic_result(item: dict[str, Any], source_key: str) -> Optional[Raw
         url=link,
         title_snippet=title[:500] if title else "",
         description_snippet=snippet[:1000] if snippet else "",
+        searched_location=searched_location,
     )
 
 
@@ -58,6 +63,7 @@ async def search_serp(
     api_key: str,
     num: int = 10,
     source_key: str = "unknown",
+    searched_location: str = "",
 ) -> list[RawJobSignal]:
     """
     Run a single SerpAPI Google search and return raw job signals from organic results.
@@ -88,7 +94,7 @@ async def search_serp(
     organic = data.get("organic_results") or []
     signals = []
     for item in organic:
-        sig = _parse_organic_result(item, source_key)
+        sig = _parse_organic_result(item, source_key, searched_location)
         if sig:
             signals.append(sig)
     logger.info("SerpAPI query '%s' returned %s raw signals", query[:50], len(signals))
@@ -97,22 +103,23 @@ async def search_serp(
 
 def build_search_queries(
     job_title: str,
-    location: str,
+    locations: list[str],
     selected_sources: list[str],
-) -> list[tuple[str, str]]:
+) -> list[tuple[str, str, str]]:
     """
-    Build (query, source_key) list only for selected sources.
-    Uses config.AVAILABLE_SOURCES for query patterns. Extensible for future sources.
+    Build (source_key, location, query) for each location × source combination.
+    Uses config.AVAILABLE_SOURCES; all query logic from that dict.
     """
     from config import AVAILABLE_SOURCES
 
     qt = (job_title or "").strip() or "job"
-    loc = (location or "").strip()
     result = []
-    for key in selected_sources:
-        if key not in AVAILABLE_SOURCES:
-            continue
-        pattern = AVAILABLE_SOURCES[key]["query_pattern"]
-        query = pattern.format(job_title=qt, location=loc)
-        result.append((query, key))
+    for loc in locations:
+        loc = (loc or "").strip()
+        for key in selected_sources:
+            if key not in AVAILABLE_SOURCES:
+                continue
+            pattern = AVAILABLE_SOURCES[key]["query_pattern"]
+            query = pattern.format(job_title=qt, location=loc)
+            result.append((key, loc, query))
     return result

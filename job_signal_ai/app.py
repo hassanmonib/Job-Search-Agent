@@ -19,6 +19,7 @@ from config import (
     MAX_RESULTS_MIN,
     MAX_RESULTS_MAX,
     AVAILABLE_SOURCES,
+    AVAILABLE_LOCATIONS,
 )
 from schemas.structured_job import StructuredJob
 from services.filter_service import filter_by_date, filter_by_source
@@ -54,18 +55,18 @@ def _effective_sources_for_search(selected: List[str]) -> List[str]:
 
 def _run_pipeline(
     job_title: str,
-    location: str,
+    locations: List[str],
     max_results: int,
     selected_sources: List[str],
 ) -> List[StructuredJob]:
-    """Run Search Agent (only selected sources) then Extractor Agent; return structured jobs."""
+    """Run Search Agent (per location × source) then Extractor Agent; return structured jobs."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         raw_signals = loop.run_until_complete(
             run_search_agent(
                 job_title=job_title,
-                location=location,
+                locations=locations,
                 max_results=max_results,
                 selected_sources=selected_sources,
             )
@@ -94,7 +95,7 @@ def _export_csv(jobs: List[StructuredJob]) -> bytes:
     headers = [
         "title", "company", "location", "employment_type", "experience_required",
         "skills", "salary", "contact_email", "description_summary", "source", "source_url",
-        "is_valid_job", "posted_date", "posted_days_ago",
+        "is_valid_job", "posted_date", "posted_days_ago", "searched_location",
     ]
     writer.writerow(headers)
     for j in jobs:
@@ -113,6 +114,7 @@ def _export_csv(jobs: List[StructuredJob]) -> bytes:
             j.is_valid_job,
             str(j.posted_date) if j.posted_date else "",
             j.posted_days_ago if j.posted_days_ago is not None else "",
+            j.searched_location or "",
         ]
         writer.writerow(row)
     return out.getvalue().encode("utf-8")
@@ -144,14 +146,21 @@ def render_layout() -> None:
     )
     effective_sources = _effective_sources_for_search(selected_sources_pre)
 
+    # ----- Locations (multi-city) -----
+    locations_selected = st.multiselect(
+        "Select Locations",
+        options=AVAILABLE_LOCATIONS,
+        default=["Lahore"],
+        key="locations",
+        help="Search in all selected cities. At least one required.",
+    )
+
     # ----- Input section -----
     with st.container():
-        col1, col2, col3 = st.columns([2, 2, 1])
+        col1, col2 = st.columns([3, 1])
         with col1:
             job_title = st.text_input("Job Title", placeholder="e.g. AI Engineer", key="job_title")
         with col2:
-            location = st.text_input("Location", placeholder="e.g. Lahore", key="location")
-        with col3:
             max_results = st.slider(
                 "Max results",
                 min_value=MAX_RESULTS_MIN,
@@ -168,11 +177,16 @@ def render_layout() -> None:
         st.session_state["error"] = None
     if "show_invalid" not in st.session_state:
         st.session_state["show_invalid"] = False
+    if "searched_locations" not in st.session_state:
+        st.session_state["searched_locations"] = []
 
     # ----- Run search (only on button click) -----
     if search_clicked:
         if not job_title or not job_title.strip():
             st.session_state["error"] = "Please enter a job title."
+            st.session_state["original_jobs"] = []
+        elif not locations_selected:
+            st.session_state["error"] = "Please select at least one location."
             st.session_state["original_jobs"] = []
         elif not effective_sources:
             st.session_state["error"] = "Select at least one job source (e.g. All, or specific sources) before searching."
@@ -189,11 +203,12 @@ def render_layout() -> None:
                 try:
                     jobs = _run_pipeline(
                         job_title=job_title.strip(),
-                        location=(location or "").strip(),
+                        locations=locations_selected,
                         max_results=max_results,
                         selected_sources=effective_sources,
                     )
                     st.session_state["original_jobs"] = jobs
+                    st.session_state["searched_locations"] = locations_selected
                 except Exception as e:
                     st.session_state["error"] = f"Search failed: {str(e)}"
                     st.session_state["original_jobs"] = []
@@ -251,10 +266,13 @@ def render_layout() -> None:
 
     if not original_jobs:
         if not search_clicked and not st.session_state.get("error"):
-            st.info("Enter a job title and location, then click **Search** to find job signals.")
+            st.info("Enter a job title, select at least one location, then click **Search** to find job signals.")
         elif search_clicked and not st.session_state.get("error"):
-            st.warning("No job signals found. Try different keywords or location.")
+            st.warning("No job signals found. Try different keywords or locations.")
     else:
+        searched_locations = st.session_state.get("searched_locations") or []
+        if searched_locations:
+            st.markdown(f"**Searched in:** {', '.join(searched_locations)}")
         st.markdown(f"**Total (filtered):** {len(filtered_jobs)} · **Valid jobs:** {len(valid_jobs)}")
         show_invalid = st.checkbox(
             "Show invalid / non-job results",
@@ -294,6 +312,8 @@ def render_layout() -> None:
                         if badges:
                             st.markdown(badges)
                     st.caption(f"**Source:** {_source_display_label(job.source)}")
+                    if job.searched_location:
+                        st.caption(f"**Matched location:** {job.searched_location}")
                     if job.posted_days_ago is not None:
                         st.caption(f"Posted {job.posted_days_ago} days ago")
                 with col_b:

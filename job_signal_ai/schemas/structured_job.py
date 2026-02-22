@@ -23,3 +23,4 @@ class StructuredJob(BaseModel):
     is_valid_job: bool = Field(..., description="True if this is an active hiring post, false for reposts/fake/irrelevant")
     posted_date: Optional[datetime] = Field(default=None, description="Extracted or inferred posting date")
     posted_days_ago: Optional[int] = Field(default=None, description="Days ago the job was posted (from today)")
+    searched_location: Optional[str] = Field(default=None, description="Location that was searched when this job was found")

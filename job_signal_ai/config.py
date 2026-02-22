@@ -49,3 +49,11 @@ AVAILABLE_SOURCES: dict = {
         "query_pattern": 'site:glassdoor.com/Job "{job_title}" "{location}"',
     },
 }
+
+# Locations for multi-city search (extensible)
+AVAILABLE_LOCATIONS: list = [
+    "Lahore",
+    "Karachi",
+    "Islamabad",
+    "Remote",
+]
