@@ -10,7 +10,7 @@ from collections import Counter
 from typing import List
 
 import streamlit as st
-
+# Importing the search and extractor agents
 from agents.search_agent import run_search_agent
 from agents.extractor_agent import run_extractor_agent
 from config import (
