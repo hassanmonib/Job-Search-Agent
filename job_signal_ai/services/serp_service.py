@@ -108,18 +108,22 @@ def build_search_queries(
 ) -> list[tuple[str, str, str]]:
     """
     Build (source_key, location, query) for each location × source combination.
-    Uses config.AVAILABLE_SOURCES; all query logic from that dict.
+    Uses config.AVAILABLE_SOURCES. Combined locations (e.g. Islamabad/Rawalpindi)
+    expand to one query per city; results are tagged with the combined location.
     """
-    from config import AVAILABLE_SOURCES
+    from config import AVAILABLE_SOURCES, LOCATION_QUERY_EXPANSION
 
     qt = (job_title or "").strip() or "job"
     result = []
     for loc in locations:
         loc = (loc or "").strip()
+        # Use expansion so "Islamabad/Rawalpindi" runs separate queries for each city
+        query_locations = LOCATION_QUERY_EXPANSION.get(loc, [loc])
         for key in selected_sources:
             if key not in AVAILABLE_SOURCES:
                 continue
             pattern = AVAILABLE_SOURCES[key]["query_pattern"]
-            query = pattern.format(job_title=qt, location=loc)
-            result.append((key, loc, query))
+            for query_loc in query_locations:
+                query = pattern.format(job_title=qt, location=query_loc)
+                result.append((key, loc, query))
     return result

@@ -54,6 +54,11 @@ AVAILABLE_SOURCES: dict = {
 AVAILABLE_LOCATIONS: list = [
     "Lahore",
     "Karachi",
-    "Islamabad",
+    "Islamabad/Rawalpindi",
     "Remote",
 ]
+
+# Combined locations: one option runs queries for each city, results tagged with the combined label
+LOCATION_QUERY_EXPANSION: dict = {
+    "Islamabad/Rawalpindi": ["Islamabad", "Rawalpindi"],
+}
