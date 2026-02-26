@@ -1,6 +1,6 @@
 # AI Job Signal Detection System
 
-Production-ready AI system that discovers job signals from **public** LinkedIn and Indeed content via search, then extracts structured job data using an LLM. No Selenium, Playwright, or scraping behind authentication.
+Production-ready AI system that discovers job signals from **public** LinkedIn, Indeed and Glassdoor content via search, then extracts structured job data using an LLM. No Selenium, Playwright, or scraping behind authentication.
 
 ## Architecture
 
