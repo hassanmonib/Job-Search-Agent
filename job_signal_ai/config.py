@@ -17,6 +17,13 @@ SERPAPI_KEY: str = os.getenv("SERPAPI_KEY", "")
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 MODEL_NAME: str = os.getenv("MODEL_NAME", "gpt-4o-mini")
 
+# Embeddings: "sentence_transformers" (local) or "openai" (API)
+EMBEDDING_PROVIDER: str = os.getenv("EMBEDDING_PROVIDER", "sentence_transformers")
+SENTENCE_TRANSFORMERS_MODEL: str = os.getenv(
+    "SENTENCE_TRANSFORMERS_MODEL", "all-MiniLM-L6-v2"
+)
+OPENAI_EMBEDDING_MODEL: str = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+
 # HTTP / fetch settings
 HTTP_TIMEOUT_SECONDS: float = 30.0
 HTTP_MAX_RETRIES: int = 3

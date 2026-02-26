@@ -1,16 +1,15 @@
 """
-AI Job Signal Detection System – Streamlit frontend.
-No business logic in layout; orchestration and filtering in services.
+AI Career Intelligence System – Streamlit frontend.
+Search, extract, optional CV upload and personalized ranking.
 """
-#......
 import asyncio
 import io
 import csv
 from collections import Counter
-from typing import List
+from typing import Dict, List, Optional, Tuple
 
 import streamlit as st
-# Importing the search and extractor agents
+
 from agents.search_agent import run_search_agent
 from agents.extractor_agent import run_extractor_agent
 from config import (
@@ -21,8 +20,12 @@ from config import (
     AVAILABLE_SOURCES,
     AVAILABLE_LOCATIONS,
 )
+from cv_pipeline import run_cv_pipeline
+from schemas.cv_profile import CVProfile
 from schemas.structured_job import StructuredJob
 from services.filter_service import filter_by_date, filter_by_source
+from embeddings.embedding_service import get_embedding_service
+from ranking import build_job_index_and_embed, compute_skill_gaps, rank_jobs
 
 # Posting date filter options (job board standard)
 DATE_FILTER_MAP = {
@@ -127,11 +130,64 @@ def _source_display_label(key: str) -> str:
     return SOURCE_DISPLAY.get(key, key.replace("_", " ").title())
 
 
+@st.cache_resource
+def _cached_embedding_service():
+    """Cached embedding service for FAISS and ranking (avoids reloading model)."""
+    return get_embedding_service()
+
+
+def _missing_skills_for_job(job: StructuredJob, cv_skills: List[str]) -> List[str]:
+    """Skills required by job but not in CV."""
+    job_set = set((s or "").strip().lower() for s in (job.skills or []) if (s or "").strip())
+    cv_set = set((s or "").strip().lower() for s in (cv_skills or []) if (s or "").strip())
+    missing = job_set - cv_set
+    return [s for s in (job.skills or []) if (s or "").strip() and (s or "").strip().lower() in missing]
+
+
 def render_layout() -> None:
     """Streamlit page layout; filters and display use services layer."""
-    st.set_page_config(page_title="AI Job Signal Detection System", layout="wide")
-    st.title("AI Job Signal Detection System")
-    st.markdown("*Search LinkedIn and Indeed job signals using AI-powered extraction.*")
+    st.set_page_config(page_title="AI Career Intelligence System", layout="wide")
+    st.title("AI Career Intelligence System")
+    st.markdown("*Search job signals, extract structured data, and rank by CV match.*")
+    st.divider()
+
+    # ----- CV upload (optional): for personalized ranking -----
+    st.subheader("Upload CV (optional)")
+    cv_file = st.file_uploader(
+        "Upload your CV (PDF or DOCX) for personalized job ranking and skill gap detection.",
+        type=["pdf", "docx"],
+        key="cv_upload",
+    )
+    if "cv_profile" not in st.session_state:
+        st.session_state["cv_profile"] = None
+    if "ranking_index_key" not in st.session_state:
+        st.session_state["ranking_index_key"] = None
+    if "ranking_index" not in st.session_state:
+        st.session_state["ranking_index"] = None
+
+    if cv_file is not None:
+        last_cv_name = st.session_state.get("cv_uploaded_name")
+        if last_cv_name != cv_file.name or st.session_state["cv_profile"] is None:
+            with st.spinner("Extracting CV and building profile…"):
+                try:
+                    profile = run_cv_pipeline(cv_file.getvalue(), cv_file.name)
+                    st.session_state["cv_profile"] = profile
+                    st.session_state["cv_uploaded_name"] = cv_file.name
+                    if profile:
+                        st.success(
+                            f"CV parsed: {len(profile.skills)} skills, domain: {profile.domain or '—'}, "
+                            f"experience: {profile.experience_years or '—'}"
+                        )
+                    else:
+                        st.warning("Could not extract a structured profile from the CV.")
+                except Exception as e:
+                    st.session_state["cv_profile"] = None
+                    st.session_state["cv_uploaded_name"] = None
+                    st.error(f"CV processing failed: {str(e)}")
+    else:
+        st.session_state["cv_profile"] = None
+        st.session_state["cv_uploaded_name"] = None
+
     st.divider()
 
     # ----- Pre-search: source selection (controls which sources are queried) -----
@@ -257,12 +313,42 @@ def render_layout() -> None:
     else:
         filtered_jobs = []
 
+    # ----- Personalized ranking when CV uploaded -----
+    cv_profile: Optional[CVProfile] = st.session_state.get("cv_profile")
+    score_by_url: Dict[str, float] = {}
+    ranked_jobs: List[StructuredJob] = filtered_jobs
+    skill_gap_missing: List[str] = []
+    skill_gap_recommended: List[str] = []
+
+    if cv_profile and filtered_jobs:
+        try:
+            emb = _cached_embedding_service()
+            current_key = tuple(sorted(j.source_url for j in filtered_jobs))
+            if (
+                st.session_state.get("ranking_index_key") != current_key
+                or st.session_state.get("ranking_index") is None
+            ):
+                with st.spinner("Building job embedding index…"):
+                    idx = build_job_index_and_embed(filtered_jobs, emb)
+                    st.session_state["ranking_index"] = idx
+                    st.session_state["ranking_index_key"] = current_key
+            idx = st.session_state["ranking_index"]
+            ranked_with_scores = rank_jobs(
+                filtered_jobs, cv_profile, st.session_state.get("searched_locations") or [], emb, idx
+            )
+            ranked_jobs = [j for j, _ in ranked_with_scores]
+            score_by_url = {j.source_url: s for j, s in ranked_with_scores}
+            top_10 = ranked_jobs[:10]
+            skill_gap_missing, skill_gap_recommended = compute_skill_gaps(top_10, cv_profile)
+        except Exception as e:
+            st.warning(f"Ranking skipped: {e}")
+
     st.divider()
 
-    # ----- Results section (based on filtered_jobs) -----
+    # ----- Results section (based on filtered_jobs; order = ranked when CV present) -----
     st.subheader("Results")
-    valid_jobs = [j for j in filtered_jobs if j.is_valid_job]
-    invalid_jobs = [j for j in filtered_jobs if not j.is_valid_job]
+    valid_jobs = [j for j in ranked_jobs if j.is_valid_job]
+    invalid_jobs = [j for j in ranked_jobs if not j.is_valid_job]
 
     if not original_jobs:
         if not search_clicked and not st.session_state.get("error"):
@@ -280,6 +366,10 @@ def render_layout() -> None:
             key="show_invalid_cb",
         )
         st.session_state["show_invalid"] = show_invalid
+
+        if cv_profile and skill_gap_recommended:
+            with st.expander("Recommended skills to learn (from top 10 jobs)"):
+                st.markdown(", ".join(f"**{s}**" for s in skill_gap_recommended))
 
         skill_summary = _skill_frequency_summary(valid_jobs, 5)
         if skill_summary:
@@ -304,6 +394,12 @@ def render_layout() -> None:
                 col_a, col_b = st.columns([3, 1])
                 with col_a:
                     st.markdown(f"### {job.title or 'Untitled'}")
+                    if cv_profile and job.source_url in score_by_url:
+                        pct = int(round(score_by_url[job.source_url] * 100))
+                        st.caption(f"**Match Score:** {pct}%")
+                    missing = _missing_skills_for_job(job, cv_profile.skills if cv_profile else [])
+                    if cv_profile and missing:
+                        st.caption(f"**Missing skills:** {', '.join(missing)}")
                     st.caption(f"**Company:** {job.company or '—'} · **Location:** {job.location or '—'}")
                     if job.employment_type or job.experience_required:
                         st.caption(f"*{job.employment_type or ''} {job.experience_required or ''}*".strip())
