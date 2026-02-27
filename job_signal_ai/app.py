@@ -12,6 +12,7 @@ import streamlit as st
 
 from agents.search_agent import run_search_agent
 from agents.extractor_agent import run_extractor_agent
+from agents.query_strategies import TitleQueryStrategy, ResumeQueryStrategy
 from config import (
     SERPAPI_KEY,
     OPENAI_API_KEY,
@@ -56,24 +57,12 @@ def _effective_sources_for_search(selected: List[str]) -> List[str]:
     return [s for s in selected if s in AVAILABLE_SOURCES]
 
 
-def _run_pipeline(
-    job_title: str,
-    locations: List[str],
-    max_results: int,
-    selected_sources: List[str],
-) -> List[StructuredJob]:
-    """Run Search Agent (per location × source) then Extractor Agent; return structured jobs."""
+def _run_pipeline(strategy, max_results: int) -> List[StructuredJob]:
+    """Run Search Agent (using strategy) then Extractor Agent; return structured jobs."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        raw_signals = loop.run_until_complete(
-            run_search_agent(
-                job_title=job_title,
-                locations=locations,
-                max_results=max_results,
-                selected_sources=selected_sources,
-            )
-        )
+        raw_signals = loop.run_until_complete(run_search_agent(strategy=strategy, max_results=max_results))
         if not raw_signals:
             return []
         jobs = loop.run_until_complete(run_extractor_agent(raw_signals))
@@ -151,10 +140,20 @@ def render_layout() -> None:
     st.markdown("*Search job signals, extract structured data, and rank by CV match.*")
     st.divider()
 
-    # ----- CV upload (optional): for personalized ranking -----
-    st.subheader("Upload CV (optional)")
+    # ----- Search mode: Title (user intent) vs Resume (skill-driven) -----
+    search_mode = st.radio(
+        "Select Search Mode",
+        ["Search by Title", "Search by Resume"],
+        key="search_mode",
+        help="Title: enter a job title. Resume: upload CV to search by inferred roles from your skills.",
+    )
+    is_resume_mode = search_mode == "Search by Resume"
+
+    # ----- CV upload: required in Resume mode, optional in Title mode (for ranking) -----
+    cv_label = "Upload CV (required for search)" if is_resume_mode else "Upload CV (optional, for ranking)"
+    st.subheader(cv_label)
     cv_file = st.file_uploader(
-        "Upload your CV (PDF or DOCX) for personalized job ranking and skill gap detection.",
+        cv_label + ": PDF or DOCX.",
         type=["pdf", "docx"],
         key="cv_upload",
     )
@@ -215,7 +214,8 @@ def render_layout() -> None:
     with st.container():
         col1, col2 = st.columns([3, 1])
         with col1:
-            job_title = st.text_input("Job Title", placeholder="e.g. AI Engineer", key="job_title")
+            job_title_placeholder = "e.g. AI Engineer (optional in Resume mode)" if is_resume_mode else "e.g. AI Engineer"
+            job_title = st.text_input("Job Title", placeholder=job_title_placeholder, key="job_title")
         with col2:
             max_results = st.slider(
                 "Max results",
@@ -238,10 +238,7 @@ def render_layout() -> None:
 
     # ----- Run search (only on button click) -----
     if search_clicked:
-        if not job_title or not job_title.strip():
-            st.session_state["error"] = "Please enter a job title."
-            st.session_state["original_jobs"] = []
-        elif not locations_selected:
+        if not locations_selected:
             st.session_state["error"] = "Please select at least one location."
             st.session_state["original_jobs"] = []
         elif not effective_sources:
@@ -250,24 +247,64 @@ def render_layout() -> None:
         elif not SERPAPI_KEY:
             st.session_state["error"] = "SERPAPI_KEY is not set. Add it to your .env file."
             st.session_state["original_jobs"] = []
-        elif not OPENAI_API_KEY:
-            st.session_state["error"] = "OPENAI_API_KEY is not set. Add it to your .env file."
-            st.session_state["original_jobs"] = []
+        elif is_resume_mode:
+            if not cv_file:
+                st.session_state["error"] = "In Resume mode, please upload your CV (PDF or DOCX) to search."
+                st.session_state["original_jobs"] = []
+            elif not OPENAI_API_KEY:
+                st.session_state["error"] = "OPENAI_API_KEY is not set (required for CV extraction). Add it to your .env file."
+                st.session_state["original_jobs"] = []
+            else:
+                st.session_state["error"] = None
+                with st.spinner("Extracting skills from CV and searching job signals…"):
+                    try:
+                        if (
+                            st.session_state.get("cv_uploaded_name") != cv_file.name
+                            or st.session_state.get("cv_profile") is None
+                        ):
+                            profile = run_cv_pipeline(cv_file.getvalue(), cv_file.name)
+                            st.session_state["cv_profile"] = profile
+                            st.session_state["cv_uploaded_name"] = cv_file.name
+                        else:
+                            profile = st.session_state.get("cv_profile")
+                        if not profile or not profile.skills:
+                            st.session_state["error"] = "Could not extract skills from the CV. Try a different file or add more skills."
+                            st.session_state["original_jobs"] = []
+                        else:
+                            strategy = ResumeQueryStrategy(
+                                extracted_skills=profile.skills,
+                                locations=locations_selected,
+                                optional_title=job_title.strip() or None,
+                                selected_sources=effective_sources,
+                            )
+                            jobs = _run_pipeline(strategy=strategy, max_results=max_results)
+                            st.session_state["original_jobs"] = jobs
+                            st.session_state["searched_locations"] = locations_selected
+                    except Exception as e:
+                        st.session_state["error"] = f"Search failed: {str(e)}"
+                        st.session_state["original_jobs"] = []
         else:
-            st.session_state["error"] = None
-            with st.spinner("Searching job signals and extracting structured data…"):
-                try:
-                    jobs = _run_pipeline(
-                        job_title=job_title.strip(),
-                        locations=locations_selected,
-                        max_results=max_results,
-                        selected_sources=effective_sources,
-                    )
-                    st.session_state["original_jobs"] = jobs
-                    st.session_state["searched_locations"] = locations_selected
-                except Exception as e:
-                    st.session_state["error"] = f"Search failed: {str(e)}"
-                    st.session_state["original_jobs"] = []
+            if not job_title or not job_title.strip():
+                st.session_state["error"] = "Please enter a job title (Title mode)."
+                st.session_state["original_jobs"] = []
+            elif not OPENAI_API_KEY:
+                st.session_state["error"] = "OPENAI_API_KEY is not set. Add it to your .env file."
+                st.session_state["original_jobs"] = []
+            else:
+                st.session_state["error"] = None
+                with st.spinner("Searching job signals and extracting structured data…"):
+                    try:
+                        strategy = TitleQueryStrategy(
+                            job_title=job_title.strip(),
+                            locations=locations_selected,
+                            selected_sources=effective_sources,
+                        )
+                        jobs = _run_pipeline(strategy=strategy, max_results=max_results)
+                        st.session_state["original_jobs"] = jobs
+                        st.session_state["searched_locations"] = locations_selected
+                    except Exception as e:
+                        st.session_state["error"] = f"Search failed: {str(e)}"
+                        st.session_state["original_jobs"] = []
 
     if st.session_state.get("error"):
         st.error(st.session_state["error"])
@@ -352,7 +389,10 @@ def render_layout() -> None:
 
     if not original_jobs:
         if not search_clicked and not st.session_state.get("error"):
-            st.info("Enter a job title, select at least one location, then click **Search** to find job signals.")
+            st.info(
+                "**Title mode:** Enter a job title, select locations and sources, then click **Search**. "
+                "**Resume mode:** Upload your CV, select locations and sources, then click **Search**."
+            )
         elif search_clicked and not st.session_state.get("error"):
             st.warning("No job signals found. Try different keywords or locations.")
     else:
